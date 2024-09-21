@@ -8,13 +8,37 @@
 #include <errno.h>
 #include <sys/stat.h>
 
-const uint32_t PAGE_SIZE = 4096;
-#define TABLE_MAX_PAGES 100
-
 #define size_of_attribute(Struct, Attribute) sizeof(((Struct*)0)->Attribute)
+
+#define TABLE_MAX_PAGES 100
 
 #define COLUMN_USERNAME_SIZE 32
 #define COLUMN_EMAIL_SIZE 255
+
+const uint32_t PAGE_SIZE = 4096;
+
+typedef enum {
+  META_COMMAND_SUCCESS,
+  META_COMMAND_UNRECOGNIZED_COMMAND
+} MetaCommandResult;
+
+typedef enum {
+  PREPARE_SUCCESS,
+  PREPARE_NEGATIVE_ID,
+  PREPARE_STRING_TOO_LONG,
+  PREPARE_SYNTAX_ERROR,
+  PREPARE_UNRECOGNIZED_STATEMENT
+} PrepareResult;
+
+typedef enum { 
+  EXECUTE_SUCCESS, 
+  EXECUTE_TABLE_FULL 
+} ExecuteResult;
+
+typedef enum { 
+  STATEMENT_INSERT, 
+  STATEMENT_SELECT 
+} StatementType;
 
 typedef struct {
   int file_descriptor;
@@ -32,6 +56,17 @@ typedef struct {
   char username[COLUMN_USERNAME_SIZE+1];
   char email[COLUMN_EMAIL_SIZE+1];
 } Row;
+
+typedef struct {
+  char* buffer;
+  size_t buffer_length;
+  ssize_t input_length;
+} InputBuffer;
+
+typedef struct {
+  StatementType type;
+  Row row_to_insert;
+} Statement;
 
 const uint32_t ID_SIZE = size_of_attribute(Row, id);
 const uint32_t USERNAME_SIZE = size_of_attribute(Row, username);
@@ -66,17 +101,6 @@ Pager* pager_open(const char* filename) {
   return pager;
 }
 
-Table* db_open(const char* filename) {
-  Pager* pager = pager_open(filename);
-  uint32_t num_rows = pager->file_length / ROW_SIZE;
-
-  Table* table = malloc(sizeof(Table));
-  table->pager = pager;
-  table->num_rows = num_rows;
-
-  return table;
-}
-
 void pager_flush(Pager* pager, uint32_t page_num, uint32_t size) {
   if (pager->pages[page_num] == NULL) {
     printf("Tried to flush null page\n");
@@ -94,6 +118,17 @@ void pager_flush(Pager* pager, uint32_t page_num, uint32_t size) {
     printf("Error writing: %d\n", errno);
     exit(EXIT_FAILURE);
   }
+}
+
+Table* db_open(const char* filename) {
+  Pager* pager = pager_open(filename);
+  uint32_t num_rows = pager->file_length / ROW_SIZE;
+
+  Table* table = malloc(sizeof(Table));
+  table->pager = pager;
+  table->num_rows = num_rows;
+
+  return table;
 }
 
 void db_close(Table* table) {
@@ -135,10 +170,6 @@ void db_close(Table* table) {
   }
 
   free(pager);
-}
-
-void print_row(Row* row) {
-  printf("(%d, %s, %s)\n", row->id, row->username, row->email);
 }
 
 void* get_page(Pager* pager, uint32_t page_num) {
@@ -192,35 +223,6 @@ void deserialize_row(void* source, Row* destination) {
   memcpy(&(destination->email), source + EMAIL_OFFSET, EMAIL_SIZE);
 }
 
-typedef enum {
-  META_COMMAND_SUCCESS,
-  META_COMMAND_UNRECOGNIZED_COMMAND
-} MetaCommandResult;
-
-typedef enum {
-  PREPARE_SUCCESS,
-  PREPARE_NEGATIVE_ID,
-  PREPARE_STRING_TOO_LONG,
-  PREPARE_SYNTAX_ERROR,
-  PREPARE_UNRECOGNIZED_STATEMENT
-} PrepareResult;
-
-typedef enum { 
-  EXECUTE_SUCCESS, 
-  EXECUTE_TABLE_FULL 
-} ExecuteResult;
-
-typedef enum { 
-  STATEMENT_INSERT, 
-  STATEMENT_SELECT 
-} StatementType;
-
-typedef struct {
-  char* buffer;
-  size_t buffer_length;
-  ssize_t input_length;
-} InputBuffer;
-
 InputBuffer* new_input_buffer() {
   InputBuffer* input_buffer = malloc(sizeof(InputBuffer));
   input_buffer->buffer = NULL;
@@ -229,13 +231,6 @@ InputBuffer* new_input_buffer() {
 
   return input_buffer;
 }
-
-typedef struct {
-  StatementType type;
-  Row row_to_insert;
-} Statement;
-
-void print_prompt() { printf("db > "); }
 
 void read_input(InputBuffer* input_buffer) {
   ssize_t bytes_read =
@@ -315,6 +310,10 @@ ExecuteResult execute_insert(Statement* statement, Table* table) {
   return EXECUTE_SUCCESS;
 }
 
+void print_row(Row* row) {
+  printf("(%d, %s, %s)\n", row->id, row->username, row->email);
+}
+
 ExecuteResult execute_select(Statement* statement, Table* table) {
   Row row;
   for (uint32_t i = 0; i < table->num_rows; i++) {
@@ -332,6 +331,8 @@ ExecuteResult execute_statement(Statement* statement, Table* table) {
       return execute_select(statement, table);
   }
 }
+
+void print_prompt() { printf("db > "); }
 
 int main(int argc, char* argv[]) {
   if (argc < 2) {
