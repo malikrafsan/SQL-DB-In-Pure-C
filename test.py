@@ -1,10 +1,15 @@
 import unittest
 import subprocess
+import os
 
 class TestDatabase(unittest.TestCase):
+    def setUp(self):
+        if os.path.exists("test.db"):
+            os.remove("test.db")
+
     def run_script(self, commands):
         process = subprocess.Popen(
-            ['./main'],
+            ['./main', 'test.db'],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -84,6 +89,30 @@ class TestDatabase(unittest.TestCase):
             "db >",
         ]
         self.assertEqual(result, expected_output)
+
+    def test_persistent_data(self):
+        script1 = [
+            "insert 1 user1 person1@example.com",
+            ".exit\n",
+        ]
+        result1 = self.run_script(script1)
+        expected_output = [
+            "db > Executed.",
+            "db >",
+        ]
+        self.assertEqual(result1, expected_output)
+
+        script2 = [
+            "select",
+            ".exit\n",
+        ]
+        result2 = self.run_script(script2)
+        expected_output = [
+            "db > (1, user1, person1@example.com)",
+            "Executed.",
+            "db >",
+        ]
+        self.assertEqual(result2, expected_output)
 
 if __name__ == '__main__':
     unittest.main()
