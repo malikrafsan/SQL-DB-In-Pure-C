@@ -128,7 +128,9 @@ void pager_flush(Pager* pager, uint32_t page_num, uint32_t size) {
 
 Table* db_open(const char* filename) {
   Pager* pager = pager_open(filename);
-  uint32_t num_rows = pager->file_length / ROW_SIZE;
+  uint32_t num_pages = pager->file_length / PAGE_SIZE;
+  uint32_t bytes_remaining = pager->file_length % PAGE_SIZE;
+  uint32_t num_rows = (num_pages * ROWS_PER_PAGE) + (bytes_remaining / ROW_SIZE);
 
   Table* table = malloc(sizeof(Table));
   table->pager = pager;
