@@ -34,6 +34,24 @@ typedef enum { EXECUTE_SUCCESS, EXECUTE_TABLE_FULL } ExecuteResult;
 
 typedef enum { STATEMENT_INSERT, STATEMENT_SELECT } StatementType;
 
+typedef enum {
+  INTEGER,
+  VARCHAR,
+  REAL
+} ColumnType;
+
+typedef struct {
+  char* data;
+  int length;
+} Bytes;
+
+typedef struct {
+  ColumnType type;
+  uint32_t size;
+  uint32_t offset;
+  char name[32];
+} ColumnDefinition;
+
 typedef struct {
   int file_descriptor;
   uint32_t file_length;
@@ -43,6 +61,11 @@ typedef struct {
 typedef struct {
   uint32_t num_rows;
   Pager* pager;
+  uint32_t num_columns;
+  ColumnDefinition* columns;
+  uint32_t row_size;
+  uint32_t rows_per_page;
+  uint32_t max_rows;
 } Table;
 
 typedef struct {
@@ -51,11 +74,7 @@ typedef struct {
   bool end_of_table;
 } Cursor;
 
-typedef struct {
-  uint32_t id;
-  char username[COLUMN_USERNAME_SIZE + 1];
-  char email[COLUMN_EMAIL_SIZE + 1];
-} Row;
+typedef Bytes Row;
 
 typedef struct {
   char* buffer;
@@ -67,17 +86,6 @@ typedef struct {
   StatementType type;
   Row row_to_insert;
 } Statement;
-
-const uint32_t ID_SIZE = size_of_attribute(Row, id);
-const uint32_t USERNAME_SIZE = size_of_attribute(Row, username);
-const uint32_t EMAIL_SIZE = size_of_attribute(Row, email);
-const uint32_t ID_OFFSET = 0;
-const uint32_t USERNAME_OFFSET = ID_OFFSET + ID_SIZE;
-const uint32_t EMAIL_OFFSET = USERNAME_OFFSET + USERNAME_SIZE;
-const uint32_t ROW_SIZE = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
-
-const uint32_t ROWS_PER_PAGE = PAGE_SIZE / ROW_SIZE;
-const uint32_t TABLE_MAX_ROWS = ROWS_PER_PAGE * TABLE_MAX_PAGES;
 
 Pager* pager_open(const char* filename) {
   int fd = open(filename, O_RDWR | O_CREAT, S_IWUSR | S_IRUSR);
@@ -120,22 +128,46 @@ void pager_flush(Pager* pager, uint32_t page_num, uint32_t size) {
 }
 
 Table* db_open(const char* filename) {
+  uint32_t num_columns = 3;
+
+  ColumnDefinition* columns = malloc(sizeof(ColumnDefinition) * num_columns);
+  ColumnDefinition id_column = {INTEGER, 4, 0, "id"};
+  ColumnDefinition username_column = {VARCHAR, 33, 4, "username"};
+  ColumnDefinition email_column = {VARCHAR, 256, 37, "email"};
+
+  columns[0] = id_column;
+  columns[1] = username_column;
+  columns[2] = email_column;
+
+  uint32_t row_size = 0;
+  for (uint32_t i = 0; i < num_columns; i++) {
+    row_size += columns[i].size;
+  }
+
+  uint32_t rows_per_page = PAGE_SIZE / row_size;
+  uint32_t table_max_rows = rows_per_page * TABLE_MAX_PAGES;
+
   Pager* pager = pager_open(filename);
   uint32_t num_pages = pager->file_length / PAGE_SIZE;
   uint32_t bytes_remaining = pager->file_length % PAGE_SIZE;
   uint32_t num_rows =
-      (num_pages * ROWS_PER_PAGE) + (bytes_remaining / ROW_SIZE);
+      (num_pages * rows_per_page) + (bytes_remaining / row_size);
 
   Table* table = malloc(sizeof(Table));
   table->pager = pager;
   table->num_rows = num_rows;
+  table->row_size = row_size;
+  table->rows_per_page = rows_per_page;
+  table->max_rows = table_max_rows;
+  table->columns = columns;
+  table->num_columns = num_columns;
 
   return table;
 }
 
 void db_close(Table* table) {
   Pager* pager = table->pager;
-  uint32_t num_full_pages = table->num_rows / ROWS_PER_PAGE;
+  uint32_t num_full_pages = table->num_rows / table->rows_per_page;
 
   for (uint32_t i = 0; i < num_full_pages; i++) {
     if (pager->pages[i] == NULL) {
@@ -147,11 +179,11 @@ void db_close(Table* table) {
   }
 
   // There may be a partial page to write to the end of the file
-  uint32_t num_additional_rows = table->num_rows % ROWS_PER_PAGE;
+  uint32_t num_additional_rows = table->num_rows % table->rows_per_page;
   if (num_additional_rows > 0) {
     uint32_t page_num = num_full_pages;
     if (pager->pages[page_num] != NULL) {
-      pager_flush(pager, page_num, num_additional_rows * ROW_SIZE);
+      pager_flush(pager, page_num, num_additional_rows * table->row_size);
       free(pager->pages[page_num]);
       pager->pages[page_num] = NULL;
     }
@@ -226,10 +258,10 @@ Cursor* table_end(Table* table) {
 
 void* cursor_value(Cursor* cursor) {
   uint32_t row_num = cursor->row_num;
-  uint32_t page_num = row_num / ROWS_PER_PAGE;
+  uint32_t page_num = row_num / cursor->table->rows_per_page;
   void* page = get_page(cursor->table->pager, page_num);
-  uint32_t row_offset = row_num % ROWS_PER_PAGE;
-  uint32_t byte_offset = row_offset * ROW_SIZE;
+  uint32_t row_offset = row_num % cursor->table->rows_per_page;
+  uint32_t byte_offset = row_offset * cursor->table->row_size;
   return page + byte_offset;
 }
 
@@ -240,16 +272,16 @@ void cursor_advance(Cursor* cursor) {
   }
 }
 
-void serialize_row(Row* source, void* destination) {
-  memcpy(destination + ID_OFFSET, &(source->id), ID_SIZE);
-  memcpy(destination + USERNAME_OFFSET, &(source->username), USERNAME_SIZE);
-  memcpy(destination + EMAIL_OFFSET, &(source->email), EMAIL_SIZE);
+void serialize_row(Row* source, void* destination, Table* table) {
+  memcpy(destination, source->data, table->row_size);
 }
 
-void deserialize_row(void* source, Row* destination) {
-  memcpy(&(destination->id), source + ID_OFFSET, ID_SIZE);
-  memcpy(&(destination->username), source + USERNAME_OFFSET, USERNAME_SIZE);
-  memcpy(&(destination->email), source + EMAIL_OFFSET, EMAIL_SIZE);
+void deserialize_row(void* source, Row* destination, Table* table) {
+  destination->data = malloc(table->row_size);
+  for (uint32_t i = 0; i < table->num_columns; i++) {
+    ColumnDefinition column = table->columns[i];
+    memcpy(destination->data + column.offset, source + column.offset, column.size);
+  }
 }
 
 InputBuffer* new_input_buffer() {
@@ -284,42 +316,42 @@ MetaCommandResult do_meta_cmd(InputBuffer* input_buffer, Table* table) {
   }
 }
 
-PrepareResult prepare_insert(InputBuffer* input_buffer, Statement* statement) {
+PrepareResult prepare_insert(InputBuffer* input_buffer, Statement* statement, Table* table) {
   statement->type = STATEMENT_INSERT;
+  statement->row_to_insert.data = malloc(table->row_size);  
 
   char* keyword = strtok(input_buffer->buffer, " ");
-  char* id_string = strtok(NULL, " ");
-  char* username = strtok(NULL, " ");
-  char* email = strtok(NULL, " ");
+  for (uint32_t i = 0; i < table->num_columns; i++) {
+    ColumnDefinition column = table->columns[i];
+    char* value = strtok(NULL, " ");
+    if (value == NULL) {
+      return PREPARE_SYNTAX_ERROR;
+    }
 
-  if (id_string == NULL || username == NULL || email == NULL) {
-    return PREPARE_SYNTAX_ERROR;
+    if (column.type == INTEGER) {
+      int int_value = atoi(value);
+      if (int_value <= 0 && strcmp(column.name, "id") == 0) {
+        return PREPARE_NEGATIVE_ID;
+      }
+
+      memcpy(statement->row_to_insert.data + column.offset, &int_value, column.size);
+    } else if (column.type == VARCHAR) {
+      int length = strlen(value);
+      if (length > (column.size-1)) {
+        return PREPARE_STRING_TOO_LONG;
+      }
+      
+      memcpy(statement->row_to_insert.data + column.offset, value, strlen(value));
+    }
   }
-
-  int id = atoi(id_string);
-  if (id < 0) {
-    return PREPARE_NEGATIVE_ID;
-  }
-
-  if (strlen(username) > COLUMN_USERNAME_SIZE) {
-    return PREPARE_STRING_TOO_LONG;
-  }
-
-  if (strlen(email) > COLUMN_EMAIL_SIZE) {
-    return PREPARE_STRING_TOO_LONG;
-  }
-
-  statement->row_to_insert.id = id;
-  strcpy(statement->row_to_insert.username, username);
-  strcpy(statement->row_to_insert.email, email);
 
   return PREPARE_SUCCESS;
 }
 
 PrepareResult prepare_statement(InputBuffer* input_buffer,
-                                Statement* statement) {
+                                Statement* statement, Table* table) {
   if (strncmp(input_buffer->buffer, "insert", 6) == 0) {
-    return prepare_insert(input_buffer, statement);
+    return prepare_insert(input_buffer, statement, table);
   }
   if (strncmp(input_buffer->buffer, "select", 6) == 0) {
     statement->type = STATEMENT_SELECT;
@@ -330,14 +362,14 @@ PrepareResult prepare_statement(InputBuffer* input_buffer,
 }
 
 ExecuteResult execute_insert(Statement* statement, Table* table) {
-  if (table->num_rows >= TABLE_MAX_ROWS) {
+  if (table->num_rows >= table->max_rows) {
     return EXECUTE_TABLE_FULL;
   }
 
   Row* row_to_insert = &(statement->row_to_insert);
   Cursor* cursor = table_end(table);
 
-  serialize_row(row_to_insert, cursor_value(cursor));
+  serialize_row(row_to_insert, cursor_value(cursor), table);
   table->num_rows += 1;
 
   free(cursor);
@@ -345,8 +377,24 @@ ExecuteResult execute_insert(Statement* statement, Table* table) {
   return EXECUTE_SUCCESS;
 }
 
-void print_row(Row* row) {
-  printf("(%d, %s, %s)\n", row->id, row->username, row->email);
+void print_row(Row* row, Table* table) {
+  printf("(");
+  for (uint32_t i = 0; i < 3; i++) {
+    ColumnDefinition column = table->columns[i];
+    if (column.type == INTEGER) {
+      int value;
+      memcpy(&value, row->data + column.offset, column.size);
+      printf("%d", value);
+    } else if (column.type == VARCHAR) {
+      char* value = malloc(column.size);
+      memcpy(value, row->data + column.offset, column.size);
+      printf("%s", value);
+    }
+    if (i < 2) {
+      printf(", ");
+    }
+  }
+  printf(")\n");
 }
 
 ExecuteResult execute_select(Statement* statement, Table* table) {
@@ -354,8 +402,8 @@ ExecuteResult execute_select(Statement* statement, Table* table) {
 
   Row row;
   while (!(cursor->end_of_table)) {
-    deserialize_row(cursor_value(cursor), &row);
-    print_row(&row);
+    deserialize_row(cursor_value(cursor), &row, table);
+    print_row(&row, table);
     cursor_advance(cursor);
   }
 
@@ -401,7 +449,7 @@ int main(int argc, char* argv[]) {
     }
 
     Statement statement;
-    PrepareResult prepare_result = prepare_statement(input_buffer, &statement);
+    PrepareResult prepare_result = prepare_statement(input_buffer, &statement, table);
     switch (prepare_result) {
       case PREPARE_SUCCESS:
         break;
