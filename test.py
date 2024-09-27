@@ -23,8 +23,8 @@ class TestDatabase(unittest.TestCase):
 
     def test_insert_and_retrieve_row(self):
         result = self.run_script([
-            "insert 1 user1 person1@example.com",
-            "select",
+            "insert into users values (1, user1, person1@example.com)",
+            "select * from users",
             ".exit\n",
         ])
         
@@ -38,7 +38,7 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(result, expected_output)
 
     def test_table_full_error(self):
-        script = [f"insert {i} user{i} person{i}@example.com" for i in range(1, 1402)]
+        script = [f"insert into users values ({i}, user{i}, person{i}@example.com)" for i in range(1, 1402)]
         script.append(".exit\n")
         result = self.run_script(script)
         self.assertEqual(result[-2], 'db > Error: Table full.')
@@ -47,8 +47,8 @@ class TestDatabase(unittest.TestCase):
         long_username = "a" * 32
         long_email = "a" * 255
         script = [
-            f"insert 1 {long_username} {long_email}",
-            "select",
+            f"insert into users values (1, {long_username}, {long_email})",
+            "select * from users",
             ".exit\n",
         ]
         result = self.run_script(script)
@@ -64,8 +64,8 @@ class TestDatabase(unittest.TestCase):
         long_username = "a" * 33
         long_email = "a" * 256
         script = [
-            f"insert 1 {long_username} {long_email}",
-            "select",
+            f"insert into users values (1, {long_username}, {long_email})",
+            "select * from users",
             ".exit\n",
         ]
         result = self.run_script(script)
@@ -78,8 +78,8 @@ class TestDatabase(unittest.TestCase):
 
     def test_negative_id_error(self):
         script = [
-            "insert -1 cstack foo@bar.com",
-            "select",
+            "insert into users values (-1, cstack, foo@bar.com)",
+            "select * from users",
             ".exit\n",
         ]
         result = self.run_script(script)
@@ -92,7 +92,7 @@ class TestDatabase(unittest.TestCase):
 
     def test_persistent_data(self):
         script1 = [
-            "insert 1 user1 person1@example.com",
+            "insert into users values (1, user1, person1@example.com)",
             ".exit\n",
         ]
         result1 = self.run_script(script1)
@@ -103,7 +103,7 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(result1, expected_output)
 
         script2 = [
-            "select",
+            "select * from users",
             ".exit\n",
         ]
         result2 = self.run_script(script2)
