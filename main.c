@@ -17,8 +17,7 @@
 
 #define MAX_LINE_LENGTH 1024
 #define MAX_NAME_LENGTH 256
-
-const uint32_t PAGE_SIZE = 4096;
+#define PAGE_SIZE 4096
 
 typedef enum {
   META_COMMAND_SUCCESS,
@@ -37,7 +36,7 @@ typedef enum {
 
 typedef enum { EXECUTE_SUCCESS, EXECUTE_TABLE_FULL } ExecuteResult;
 
-typedef enum { 
+typedef enum {
   STATEMENT_INSERT,
   STATEMENT_UPDATE,
   STATEMENT_DELETE,
@@ -246,7 +245,7 @@ Schema* schema_open(const char* filename) {
   if (schema == NULL) {
     printf("Memory allocation error\n");
     fclose(file);
-    return NULL;
+    exit(EXIT_FAILURE);
   }
 
   schema->tables = NULL;
@@ -257,7 +256,7 @@ Schema* schema_open(const char* filename) {
     printf("Error reading number of tables\n");
     fclose(file);
     free_schema(schema);
-    return NULL;
+    exit(EXIT_FAILURE);
   }
 
   schema->num_tables = atoi(line);
@@ -266,7 +265,7 @@ Schema* schema_open(const char* filename) {
     printf("Memory allocation error\n");
     fclose(file);
     free_schema(schema);
-    return NULL;
+    exit(EXIT_FAILURE);
   }
 
   for (uint32_t i = 0; i < schema->num_tables; i++) {
@@ -280,7 +279,7 @@ Schema* schema_open(const char* filename) {
       printf("Error reading table definition\n");
       fclose(file);
       free_schema(schema);
-      return NULL;
+      exit(EXIT_FAILURE);
     }
 
     size_t len = strlen(line);
@@ -297,7 +296,7 @@ Schema* schema_open(const char* filename) {
       printf("Memory allocation error\n");
       fclose(file);
       free_schema(schema);
-      return NULL;
+      exit(EXIT_FAILURE);
     }
 
     token = strtok(NULL, ";");
@@ -308,7 +307,7 @@ Schema* schema_open(const char* filename) {
       printf("Memory allocation error\n");
       fclose(file);
       free_schema(schema);
-      return NULL;
+      exit(EXIT_FAILURE);
     }
 
     char* outer_ptr = NULL;
@@ -323,7 +322,7 @@ Schema* schema_open(const char* filename) {
         printf("Error parsing column definition\n");
         fclose(file);
         free_schema(schema);
-        return NULL;
+        exit(EXIT_FAILURE);
       }
 
       char* column_name = strtok_r(column_def, ":", &inner_ptr);
@@ -335,7 +334,7 @@ Schema* schema_open(const char* filename) {
         fprintf(stderr, "Memory allocation error\n");
         fclose(file);
         free_schema(schema);
-        return NULL;
+        exit(EXIT_FAILURE);
       }
       table->columns[j].size = atoi(column_size);
       table->columns[j].type = string_to_column_type(column_type);
@@ -385,7 +384,7 @@ Schema* db_open(const char* filename) {
   Schema* schema = schema_open(filename);
   if (schema == NULL) {
     printf("Error opening schema\n");
-    return NULL;
+    exit(EXIT_FAILURE);
   }
   schema_fill(schema);
 
@@ -572,7 +571,8 @@ Operator string_to_operator(char* str_op) {
   }
 }
 
-PrepareResult copy_value_into_bytes(ColumnDefinition* column, Bytes* bytes, char* value) {
+PrepareResult copy_value_into_bytes(ColumnDefinition* column, Bytes* bytes,
+                                    char* value) {
   switch (column->type) {
     case INTEGER: {
       int int_value = atoi(value);
@@ -637,7 +637,8 @@ PrepareResult parse_where_clause(char* where_part, WhereClause* where_clause,
     }
   }
 
-  PrepareResult copy_result = copy_value_into_bytes(where_clause->column, &where_clause->value, value);
+  PrepareResult copy_result =
+      copy_value_into_bytes(where_clause->column, &where_clause->value, value);
   if (copy_result != PREPARE_SUCCESS) {
     return copy_result;
   }
@@ -645,7 +646,8 @@ PrepareResult parse_where_clause(char* where_part, WhereClause* where_clause,
   return PREPARE_SUCCESS;
 }
 
-PrepareResult prepare_delete(InputBuffer* input_buffer, Statement* statement, Schema* schema) {
+PrepareResult prepare_delete(InputBuffer* input_buffer, Statement* statement,
+                             Schema* schema) {
   statement->type = STATEMENT_DELETE;
   DeleteStatement* delete_statement = malloc(sizeof(DeleteStatement));
   if (delete_statement == NULL) {
@@ -712,7 +714,8 @@ PrepareResult prepare_delete(InputBuffer* input_buffer, Statement* statement, Sc
     return PREPARE_INTERNAL_ERROR;
   }
 
-  PrepareResult prepare_result = parse_where_clause(where_part, where_clause, table);
+  PrepareResult prepare_result =
+      parse_where_clause(where_part, where_clause, table);
   if (prepare_result != PREPARE_SUCCESS) {
     free(cpy);
     free(lower_sql);
@@ -727,7 +730,8 @@ PrepareResult prepare_delete(InputBuffer* input_buffer, Statement* statement, Sc
   return PREPARE_SUCCESS;
 }
 
-PrepareResult prepare_update(InputBuffer* input_buffer, Statement* statement, Schema* schema) {
+PrepareResult prepare_update(InputBuffer* input_buffer, Statement* statement,
+                             Schema* schema) {
   statement->type = STATEMENT_UPDATE;
   UpdateStatement* update_statement = malloc(sizeof(UpdateStatement));
   if (update_statement == NULL) {
@@ -831,7 +835,8 @@ PrepareResult prepare_update(InputBuffer* input_buffer, Statement* statement, Sc
     return PREPARE_INTERNAL_ERROR;
   }
 
-  PrepareResult prepare_result = parse_where_clause(where_part, where_clause, table);
+  PrepareResult prepare_result =
+      parse_where_clause(where_part, where_clause, table);
   if (prepare_result != PREPARE_SUCCESS) {
     free(cpy);
     free(lower_sql);
@@ -841,8 +846,9 @@ PrepareResult prepare_update(InputBuffer* input_buffer, Statement* statement, Sc
   }
 
   update_statement->where_clause = where_clause;
-  
-  PrepareResult copy_result = copy_value_into_bytes(column, &update_statement->value, value);
+
+  PrepareResult copy_result =
+      copy_value_into_bytes(column, &update_statement->value, value);
   if (copy_result != PREPARE_SUCCESS) {
     free(cpy);
     free(lower_sql);
@@ -1347,7 +1353,8 @@ ExecuteResult execute_update(Statement* statement) {
     }
 
     ColumnDefinition* column = update_statement->column;
-    memcpy(row.data + column->offset, update_statement->value.data, column->size);
+    memcpy(row.data + column->offset, update_statement->value.data,
+           column->size);
 
     serialize_row(&row, cursor_value(cursor), table);
 
@@ -1393,7 +1400,8 @@ ExecuteResult execute_delete(Statement* statement) {
   while (!(cursor->end_of_table)) {
     deserialize_row(cursor_value(cursor), &row, table);
 
-    if (memcmp(cursor_value(cursor), empty_row, table->row_size) == 0) {
+    if ((memcmp(cursor_value(cursor), empty_row, table->row_size) == 0) &&
+        cursor2->row_num == -1) {
       cursor2->row_num = cursor->row_num;
       cursor2->end_of_table = cursor->end_of_table;
       cursor_advance(cursor);
