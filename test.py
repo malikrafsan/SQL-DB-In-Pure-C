@@ -42,13 +42,13 @@ class TestDatabase(unittest.TestCase):
     def test_insert_and_select_some_columns(self):
         result = self.run_script([
             "insert into users values (1, user1, person1@example.com)",
-            "select username from users",
+            "select id, username from users",
             ".exit\n",
         ])
         
         expected_output = [
             "db > Executed.",
-            "db > (user1)",
+            "db > (1, user1)",
             "Executed.",
             "db >",
         ]
@@ -70,6 +70,44 @@ class TestDatabase(unittest.TestCase):
             "db > (1, user1, person1@example.com)",
             "(2, user2, person2@example.com)",
             "Executed.",
+            "db >",
+        ]
+
+        self.assertEqual(result, expected_output)
+    
+    def test_select_with_where_clause(self):
+        script = [
+            "insert into users values (1, user1, person1@example.com)",
+            "insert into users values (2, user2, person2@example.com)",
+            "select * from users where username = 'user2'",
+            ".exit\n",
+        ]
+
+        result = self.run_script(script)
+        expected_output = [
+            "db > Executed.",
+            "db > Executed.",
+            "db > (2, user2, person2@example.com)",
+            "Executed.",
+            "db >",
+        ]
+
+        self.assertEqual(result, expected_output)
+
+    def test_select_with_where_clause_no_match(self):
+        script = [
+            "insert into users values (1, user1, person1@example.com)",
+            "insert into users values (2, user2, person2@example.com)",
+            "select * from users where id = 3",
+            ".exit\n",
+        ]
+
+        result = self.run_script(script)
+
+        expected_output = [
+            "db > Executed.",
+            "db > Executed.",
+            "db > Executed.",
             "db >",
         ]
 

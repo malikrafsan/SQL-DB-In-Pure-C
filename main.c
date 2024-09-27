@@ -41,6 +41,15 @@ typedef enum { STATEMENT_INSERT, STATEMENT_SELECT } StatementType;
 
 typedef enum { INTEGER, VARCHAR, REAL } ColumnType;
 
+typedef enum {
+  OP_EQUAL,
+  OP_NOT_EQUAL,
+  OP_GREATER_THAN,
+  OP_LESS_THAN,
+  OP_GREATER_THAN_OR_EQUAL,
+  OP_LESS_THAN_OR_EQUAL
+} Operator;
+
 typedef struct {
   char* data;
   int length;
@@ -92,6 +101,12 @@ typedef struct {
 } InputBuffer;
 
 typedef struct {
+  ColumnDefinition* column;
+  Operator op;
+  Bytes value;
+} WhereClause;
+
+typedef struct {
   Row row_to_insert;
 } InsertStatement;
 
@@ -99,6 +114,7 @@ typedef struct {
   ColumnDefinition* columns;
   uint32_t num_columns;
   bool is_select_all;
+  WhereClause* where_clause;
 } SelectStatement;
 
 typedef struct {
@@ -238,13 +254,13 @@ Schema* schema_open(const char* filename) {
     return NULL;
   }
 
-  for (uint32_t i=0;i<schema->num_tables;i++) {
+  for (uint32_t i = 0; i < schema->num_tables; i++) {
     schema->tables[i].table_name = NULL;
     schema->tables[i].columns = NULL;
     schema->tables[i].num_columns = 0;
   }
 
-  for (uint32_t i=0;i<schema->num_tables;i++) {
+  for (uint32_t i = 0; i < schema->num_tables; i++) {
     if (fgets(line, sizeof(line), file) == NULL) {
       printf("Error reading table definition\n");
       fclose(file);
@@ -285,8 +301,9 @@ Schema* schema_open(const char* filename) {
 
     char* column_defs = strtok(NULL, ";");
     char* column_defs_cpy = strdup(column_defs);
-    for (uint32_t j=0;j<table->num_columns;j++) {
-      char* column_def = strtok_r(j == 0 ? column_defs_cpy : NULL, ",", &outer_ptr);
+    for (uint32_t j = 0; j < table->num_columns; j++) {
+      char* column_def =
+          strtok_r(j == 0 ? column_defs_cpy : NULL, ",", &outer_ptr);
       if (column_def == NULL) {
         printf("Error parsing column definition\n");
         fclose(file);
@@ -315,10 +332,10 @@ Schema* schema_open(const char* filename) {
 }
 
 void schema_fill(Schema* schema) {
-  for (uint32_t i=0;i<schema->num_tables;i++) {
+  for (uint32_t i = 0; i < schema->num_tables; i++) {
     Table* table = &schema->tables[i];
     uint32_t row_size = 0;
-    for (uint32_t j=0;j<table->num_columns;j++) {
+    for (uint32_t j = 0; j < table->num_columns; j++) {
       table->columns[j].offset = row_size;
       row_size += table->columns[j].size;
     }
@@ -338,7 +355,8 @@ void schema_fill(Schema* schema) {
     Pager* pager = pager_open(table->filename);
     uint32_t num_pages = pager->file_length / PAGE_SIZE;
     uint32_t bytes_remaining = pager->file_length % PAGE_SIZE;
-    uint32_t num_rows = (num_pages * rows_per_page) + (bytes_remaining / row_size);
+    uint32_t num_rows =
+        (num_pages * rows_per_page) + (bytes_remaining / row_size);
 
     table->pager = pager;
     table->row_size = row_size;
@@ -519,6 +537,85 @@ MetaCommandResult do_meta_cmd(InputBuffer* input_buffer, Schema* schema) {
   } else {
     return META_COMMAND_UNRECOGNIZED_COMMAND;
   }
+}
+
+Operator string_to_operator(char* str_op) {
+  if (strcmp(str_op, "=") == 0) {
+    return OP_EQUAL;
+  } else if (strcmp(str_op, "!=") == 0) {
+    return OP_NOT_EQUAL;
+  } else if (strcmp(str_op, ">") == 0) {
+    return OP_GREATER_THAN;
+  } else if (strcmp(str_op, "<") == 0) {
+    return OP_LESS_THAN;
+  } else if (strcmp(str_op, ">=") == 0) {
+    return OP_GREATER_THAN_OR_EQUAL;
+  } else if (strcmp(str_op, "<=") == 0) {
+    return OP_LESS_THAN_OR_EQUAL;
+  } else {
+    return -1;
+  }
+}
+
+PrepareResult parse_where_clause(char* where_part, WhereClause* where_clause,
+                                 Table* table) {
+  char* outer_ptr = NULL;
+  char* inner_ptr = NULL;
+
+  char* column_name = strtok_r(where_part, " ", &outer_ptr);
+  char* op = strtok_r(NULL, " ", &outer_ptr);
+  char* value = strtok_r(NULL, " ", &outer_ptr);
+
+  for (uint32_t i = 0; i < table->num_columns; i++) {
+    if (strcmp(column_name, table->columns[i].name) == 0) {
+      where_clause->column = &table->columns[i];
+      break;
+    }
+  }
+
+  if (where_clause->column == NULL) {
+    return PREPARE_SYNTAX_ERROR;
+  }
+
+  where_clause->op = string_to_operator(op);
+  if (where_clause->op == -1) {
+    return PREPARE_SYNTAX_ERROR;
+  }
+
+  switch (where_clause->column->type) {
+    case INTEGER: {
+      int int_value = atoi(value);
+      where_clause->value.length = where_clause->column->size;
+      where_clause->value.data = malloc(where_clause->value.length);
+      memcpy(where_clause->value.data, &int_value, where_clause->value.length);
+      break;
+    }
+    case VARCHAR: {
+      // strip ' from the front and the end of value
+      if (value[0] != '\'' || value[strlen(value) - 1] != '\'') {
+        return PREPARE_SYNTAX_ERROR;
+      }
+
+      if (where_clause->op != OP_EQUAL && where_clause->op != OP_NOT_EQUAL) {
+        return PREPARE_SYNTAX_ERROR;
+      }
+
+      value[strlen(value) - 1] = '\0';
+      value++;
+      where_clause->value.length = strlen(value);
+      where_clause->value.data = value;
+      break;
+    }
+    case REAL: {
+      double real_value = atof(value);
+      where_clause->value.length = where_clause->column->size;
+      where_clause->value.data = malloc(where_clause->value.length);
+      memcpy(where_clause->value.data, &real_value, where_clause->value.length);
+      break;
+    }
+  }
+
+  return PREPARE_SUCCESS;
 }
 
 PrepareResult prepare_insert(InputBuffer* input_buffer, Statement* statement,
@@ -718,7 +815,19 @@ PrepareResult prepare_select(InputBuffer* input_buffer, Statement* statement,
     }
   }
 
-  char* table_name = from_pos + 6;
+  // parse where clause
+  char* where_pos = strstr(lower_sql, " where ");
+  size_t table_name_length = 0;
+  // char* table_name = NULL;
+  if (where_pos) {
+    table_name_length = where_pos - (from_pos + 6);
+  } else {
+    table_name_length = strlen(from_pos + 6);
+  }
+
+  char* table_name = malloc(table_name_length + 1);
+  strncpy(table_name, from_pos + 6, table_name_length);
+  table_name[table_name_length] = '\0';
   trim(table_name);
 
   Table* table = NULL;
@@ -765,6 +874,52 @@ PrepareResult prepare_select(InputBuffer* input_buffer, Statement* statement,
       free(select_statement);
       return PREPARE_SYNTAX_ERROR;
     }
+  }
+
+  if (where_pos) {
+    WhereClause* where_clause = malloc(sizeof(WhereClause));
+    if (where_clause == NULL) {
+      for (uint32_t i = 0; i < num_columns; i++) {
+        free(columns[i]);
+      }
+      free(columns);
+      free(cpy);
+      free(lower_sql);
+      free(columns_part);
+      free(select_statement);
+      return PREPARE_INTERNAL_ERROR;
+    }
+
+    char* where_part = strdup(where_pos + 7);
+    if (!where_part) {
+      for (uint32_t i = 0; i < num_columns; i++) {
+        free(columns[i]);
+      }
+      free(columns);
+      free(cpy);
+      free(lower_sql);
+      free(columns_part);
+      free(select_statement);
+      return PREPARE_INTERNAL_ERROR;
+    }
+
+    PrepareResult prepare_result =
+        parse_where_clause(where_part, where_clause, statement->table);
+    if (prepare_result != PREPARE_SUCCESS) {
+      for (uint32_t i = 0; i < num_columns; i++) {
+        free(columns[i]);
+      }
+      free(columns);
+      free(cpy);
+      free(lower_sql);
+      free(columns_part);
+      free(select_statement);
+      free(where_clause);
+      free(where_part);
+      return prepare_result;
+    }
+
+    select_statement->where_clause = where_clause;
   }
 
   statement->statementDetail = select_statement;
@@ -844,15 +999,85 @@ void print_row(Row* row, Table* table, SelectStatement* select_statement) {
   printf(")\n");
 }
 
+bool valid_where_clause(Row* row, WhereClause* where_clause) {
+  ColumnDefinition* column = where_clause->column;
+  Operator op = where_clause->op;
+  Bytes value = where_clause->value;
+
+  switch (column->type) {
+    case INTEGER: {
+      int int_value;
+      memcpy(&int_value, row->data + column->offset, column->size);
+      int where_int_value;
+      memcpy(&where_int_value, value.data, value.length);
+
+      switch (op) {
+        case OP_EQUAL:
+          return int_value == where_int_value;
+        case OP_NOT_EQUAL:
+          return int_value != where_int_value;
+        case OP_GREATER_THAN:
+          return int_value > where_int_value;
+        case OP_LESS_THAN:
+          return int_value < where_int_value;
+        case OP_GREATER_THAN_OR_EQUAL:
+          return int_value >= where_int_value;
+        case OP_LESS_THAN_OR_EQUAL:
+          return int_value <= where_int_value;
+      }
+    }
+    case VARCHAR: {
+      char* str_value = malloc(column->size + 1);
+      memcpy(str_value, row->data + column->offset, column->size);
+      str_value[column->size] = '\0';
+
+      switch (op) {
+        case OP_EQUAL:
+          return strcmp(str_value, value.data) == 0;
+        case OP_NOT_EQUAL:
+          return strcmp(str_value, value.data) != 0;
+      }
+    }
+    case REAL: {
+      double real_value;
+      memcpy(&real_value, row->data + column->offset, column->size);
+      double where_real_value;
+      memcpy(&where_real_value, value.data, value.length);
+
+      switch (op) {
+        case OP_EQUAL:
+          return real_value == where_real_value;
+        case OP_NOT_EQUAL:
+          return real_value != where_real_value;
+        case OP_GREATER_THAN:
+          return real_value > where_real_value;
+        case OP_LESS_THAN:
+          return real_value < where_real_value;
+        case OP_GREATER_THAN_OR_EQUAL:
+          return real_value >= where_real_value;
+        case OP_LESS_THAN_OR_EQUAL:
+          return real_value <= where_real_value;
+      }
+    }
+  }
+}
+
 ExecuteResult execute_select(Statement* statement) {
   SelectStatement* select_statement = statement->statementDetail;
   Table* table = statement->table;
+  WhereClause* where_clause = select_statement->where_clause;
 
   Cursor* cursor = table_start(table);
 
   Row row;
   while (!(cursor->end_of_table)) {
     deserialize_row(cursor_value(cursor), &row, table);
+
+    if (where_clause && !valid_where_clause(&row, where_clause)) {
+      cursor_advance(cursor);
+      continue;
+    }
+
     print_row(&row, table, select_statement);
     cursor_advance(cursor);
   }
