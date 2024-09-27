@@ -4,12 +4,14 @@ import os
 
 class TestDatabase(unittest.TestCase):
     def setUp(self):
-        if os.path.exists("test.db"):
-            os.remove("test.db")
+        # remove .table files inside data directory
+        for file in os.listdir('data'):
+            if file.endswith('.table'):
+                os.remove(f'data/{file}')
 
     def run_script(self, commands):
         process = subprocess.Popen(
-            ['./main', 'test.db'],
+            ['./main', 'db.schema'],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

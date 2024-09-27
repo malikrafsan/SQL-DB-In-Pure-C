@@ -1,0 +1,3 @@
+2
+users;3;id:4:int,username:32:varchar,email:255:varchar
+balance;2;user_id:4:int,balance:8:real

@@ -11,10 +11,12 @@
 
 #define size_of_attribute(Struct, Attribute) sizeof(((Struct*)0)->Attribute)
 
+#define DIR_PREFIX "data/"
+
 #define TABLE_MAX_PAGES 100
 
-#define COLUMN_USERNAME_SIZE 32
-#define COLUMN_EMAIL_SIZE 255
+#define MAX_LINE_LENGTH 1024
+#define MAX_NAME_LENGTH 256
 
 const uint32_t PAGE_SIZE = 4096;
 
@@ -45,28 +47,29 @@ typedef struct {
 } Bytes;
 
 typedef struct {
-  ColumnType type;
+  char* name;
   uint32_t size;
   uint32_t offset;
-  char name[32];
+  ColumnType type;
 } ColumnDefinition;
 
 typedef struct {
+  void* pages[TABLE_MAX_PAGES];
   int file_descriptor;
   uint32_t file_length;
-  void* pages[TABLE_MAX_PAGES];
 } Pager;
 
 typedef struct {
-  uint32_t num_rows;
-  Pager* pager;
-  uint32_t num_columns;
   ColumnDefinition* columns;
+  char* filename;
+  char* table_name;
+  Pager* pager;
+
+  uint32_t num_rows;
+  uint32_t num_columns;
   uint32_t row_size;
   uint32_t rows_per_page;
   uint32_t max_rows;
-  char* filename;
-  char* table_name;
 } Table;
 
 typedef struct {
@@ -84,8 +87,8 @@ typedef Bytes Row;
 
 typedef struct {
   char* buffer;
-  size_t buffer_length;
   ssize_t input_length;
+  size_t buffer_length;
 } InputBuffer;
 
 typedef struct {
@@ -93,15 +96,15 @@ typedef struct {
 } InsertStatement;
 
 typedef struct {
-  bool is_select_all;
-  uint32_t num_columns;
   ColumnDefinition* columns;
+  uint32_t num_columns;
+  bool is_select_all;
 } SelectStatement;
 
 typedef struct {
-  StatementType type;
   Table* table;
   void* statementDetail;
+  StatementType type;
 } Statement;
 
 char* str_to_lower(const char* str) {
@@ -121,6 +124,45 @@ void trim(char* str) {
 
   *(end + 1) = '\0';
   memmove(str, start, end - start + 2);
+}
+
+ColumnType string_to_column_type(const char* str) {
+  if (strcmp(str, "int") == 0) return INTEGER;
+  if (strcmp(str, "varchar") == 0) return VARCHAR;
+  if (strcmp(str, "real") == 0) return REAL;
+  fprintf(stderr, "Unknown column type: %s\n", str);
+  exit(1);
+}
+
+void free_table(Table* table) {
+  if (!table) {
+    return;
+  }
+
+  free(table->table_name);
+  free(table->filename);
+  if (!table->columns) {
+    return;
+  }
+
+  for (uint32_t j = 0; j < table->num_columns; j++) {
+    free(table->columns[j].name);
+  }
+  free(table->columns);
+}
+
+void free_schema(Schema* schema) {
+  if (!schema) {
+    return;
+  }
+
+  if (schema->tables) {
+    for (uint32_t i = 0; i < schema->num_tables; i++) {
+      free_table(&schema->tables[i]);
+    }
+    free(schema->tables);
+  }
+  free(schema);
 }
 
 Pager* pager_open(const char* filename) {
@@ -163,47 +205,156 @@ void pager_flush(Pager* pager, uint32_t page_num, uint32_t size) {
   }
 }
 
-Schema* db_open(const char* filename) {
-  uint32_t num_columns = 3;
-
-  ColumnDefinition* columns = malloc(sizeof(ColumnDefinition) * num_columns);
-  ColumnDefinition id_column = {INTEGER, 4, 0, "id"};
-  ColumnDefinition username_column = {VARCHAR, 32, 4, "username"};
-  ColumnDefinition email_column = {VARCHAR, 255, 36, "email"};
-
-  columns[0] = id_column;
-  columns[1] = username_column;
-  columns[2] = email_column;
-
-  uint32_t row_size = 0;
-  for (uint32_t i = 0; i < num_columns; i++) {
-    row_size += columns[i].size;
+Schema* schema_open(const char* filename) {
+  FILE* file = fopen(filename, "r");
+  if (file == NULL) {
+    printf("Error opening schema file\n");
   }
 
-  uint32_t rows_per_page = PAGE_SIZE / row_size;
-  uint32_t table_max_rows = rows_per_page * TABLE_MAX_PAGES;
-
-  Pager* pager = pager_open(filename);
-  uint32_t num_pages = pager->file_length / PAGE_SIZE;
-  uint32_t bytes_remaining = pager->file_length % PAGE_SIZE;
-  uint32_t num_rows =
-      (num_pages * rows_per_page) + (bytes_remaining / row_size);
-
-  Table table;
-  table.pager = pager;
-  table.num_rows = num_rows;
-  table.row_size = row_size;
-  table.rows_per_page = rows_per_page;
-  table.max_rows = table_max_rows;
-  table.columns = columns;
-  table.num_columns = num_columns;
-  table.filename = "users.db";
-  table.table_name = "users";
-
   Schema* schema = malloc(sizeof(Schema));
-  schema->num_tables = 1;
-  schema->tables = malloc(sizeof(Table) * schema->num_tables);
-  schema->tables[0] = table;
+  if (schema == NULL) {
+    printf("Memory allocation error\n");
+    fclose(file);
+    return NULL;
+  }
+
+  schema->tables = NULL;
+  schema->num_tables = 0;
+
+  char line[MAX_LINE_LENGTH];
+  if (fgets(line, sizeof(line), file) == NULL) {
+    printf("Error reading number of tables\n");
+    fclose(file);
+    free_schema(schema);
+    return NULL;
+  }
+
+  schema->num_tables = atoi(line);
+  schema->tables = malloc(schema->num_tables * sizeof(Table));
+  if (schema->tables == NULL) {
+    printf("Memory allocation error\n");
+    fclose(file);
+    free_schema(schema);
+    return NULL;
+  }
+
+  for (uint32_t i=0;i<schema->num_tables;i++) {
+    schema->tables[i].table_name = NULL;
+    schema->tables[i].columns = NULL;
+    schema->tables[i].num_columns = 0;
+  }
+
+  for (uint32_t i=0;i<schema->num_tables;i++) {
+    if (fgets(line, sizeof(line), file) == NULL) {
+      printf("Error reading table definition\n");
+      fclose(file);
+      free_schema(schema);
+      return NULL;
+    }
+
+    size_t len = strlen(line);
+    if (len > 0 && line[len - 1] == '\n') {
+      line[len - 1] = '\0';
+    }
+
+    Table* table = &schema->tables[i];
+    char* token;
+
+    token = strtok(line, ";");
+    table->table_name = strdup(token);
+    if (table->table_name == NULL) {
+      printf("Memory allocation error\n");
+      fclose(file);
+      free_schema(schema);
+      return NULL;
+    }
+
+    token = strtok(NULL, ";");
+    table->num_columns = atoi(token);
+
+    table->columns = malloc(table->num_columns * sizeof(ColumnDefinition));
+    if (table->columns == NULL) {
+      printf("Memory allocation error\n");
+      fclose(file);
+      free_schema(schema);
+      return NULL;
+    }
+
+    char* outer_ptr = NULL;
+    char* inner_ptr = NULL;
+
+    char* column_defs = strtok(NULL, ";");
+    char* column_defs_cpy = strdup(column_defs);
+    for (uint32_t j=0;j<table->num_columns;j++) {
+      char* column_def = strtok_r(j == 0 ? column_defs_cpy : NULL, ",", &outer_ptr);
+      if (column_def == NULL) {
+        printf("Error parsing column definition\n");
+        fclose(file);
+        free_schema(schema);
+        return NULL;
+      }
+
+      char* column_name = strtok_r(column_def, ":", &inner_ptr);
+      char* column_size = strtok_r(NULL, ":", &inner_ptr);
+      char* column_type = strtok_r(NULL, ":", &inner_ptr);
+
+      table->columns[j].name = strdup(column_name);
+      if (table->columns[j].name == NULL) {
+        fprintf(stderr, "Memory allocation error\n");
+        fclose(file);
+        free_schema(schema);
+        return NULL;
+      }
+      table->columns[j].size = atoi(column_size);
+      table->columns[j].type = string_to_column_type(column_type);
+    }
+  }
+
+  fclose(file);
+  return schema;
+}
+
+void schema_fill(Schema* schema) {
+  for (uint32_t i=0;i<schema->num_tables;i++) {
+    Table* table = &schema->tables[i];
+    uint32_t row_size = 0;
+    for (uint32_t j=0;j<table->num_columns;j++) {
+      table->columns[j].offset = row_size;
+      row_size += table->columns[j].size;
+    }
+
+    uint32_t rows_per_page = PAGE_SIZE / row_size;
+    uint32_t table_max_rows = rows_per_page * TABLE_MAX_PAGES;
+
+    char* filename = malloc(strlen(table->table_name) + strlen(DIR_PREFIX) + 7);
+    if (filename == NULL) {
+      printf("Memory allocation error\n");
+      free_schema(schema);
+      return;
+    }
+    sprintf(filename, "%s%s.table", DIR_PREFIX, table->table_name);
+    table->filename = filename;
+
+    Pager* pager = pager_open(table->filename);
+    uint32_t num_pages = pager->file_length / PAGE_SIZE;
+    uint32_t bytes_remaining = pager->file_length % PAGE_SIZE;
+    uint32_t num_rows = (num_pages * rows_per_page) + (bytes_remaining / row_size);
+
+    table->pager = pager;
+    table->row_size = row_size;
+    table->rows_per_page = rows_per_page;
+    table->max_rows = table_max_rows;
+    table->num_rows = num_rows;
+  }
+}
+
+Schema* db_open(const char* filename) {
+  Schema* schema = schema_open(filename);
+  if (schema == NULL) {
+    printf("Error opening schema\n");
+    return NULL;
+  }
+  schema_fill(schema);
 
   return schema;
 }
@@ -470,6 +621,7 @@ PrepareResult prepare_insert(InputBuffer* input_buffer, Statement* statement,
 
   Row row;
   row.data = malloc(table->row_size);
+  memset(row.data, 0, table->row_size);
   for (int i = 0; i < num_values; i++) {
     ColumnDefinition column = table->columns[i];
     char* value = values[i];
