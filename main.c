@@ -659,10 +659,17 @@ ExecuteResult execute_insert(Statement* statement) {
   return EXECUTE_SUCCESS;
 }
 
-void print_row(Row* row, Table* table) {
+void print_row(Row* row, Table* table, SelectStatement* select_statement) {
+  uint32_t num_columns = select_statement->is_select_all
+                             ? table->num_columns
+                             : select_statement->num_columns;
+  ColumnDefinition* columns = select_statement->is_select_all
+                                  ? table->columns
+                                  : select_statement->columns;
+
   printf("(");
-  for (uint32_t i = 0; i < 3; i++) {
-    ColumnDefinition column = table->columns[i];
+  for (uint32_t i = 0; i < num_columns; i++) {
+    ColumnDefinition column = columns[i];
     if (column.type == INTEGER) {
       int value;
       memcpy(&value, row->data + column.offset, column.size);
@@ -672,11 +679,16 @@ void print_row(Row* row, Table* table) {
       memcpy(value, row->data + column.offset, column.size);
       value[column.size] = '\0';
       printf("%s", value);
+    } else if (column.type == REAL) {
+      float value;
+      memcpy(&value, row->data + column.offset, column.size);
+      printf("%f", value);
     }
-    if (i < 2) {
+    if (i < num_columns - 1) {
       printf(", ");
     }
   }
+
   printf(")\n");
 }
 
@@ -689,7 +701,7 @@ ExecuteResult execute_select(Statement* statement) {
   Row row;
   while (!(cursor->end_of_table)) {
     deserialize_row(cursor_value(cursor), &row, table);
-    print_row(&row, table);
+    print_row(&row, table, select_statement);
     cursor_advance(cursor);
   }
 

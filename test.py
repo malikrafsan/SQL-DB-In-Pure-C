@@ -37,6 +37,42 @@ class TestDatabase(unittest.TestCase):
         
         self.assertEqual(result, expected_output)
 
+    def test_insert_and_select_some_columns(self):
+        result = self.run_script([
+            "insert into users values (1, user1, person1@example.com)",
+            "select username from users",
+            ".exit\n",
+        ])
+        
+        expected_output = [
+            "db > Executed.",
+            "db > (user1)",
+            "Executed.",
+            "db >",
+        ]
+        
+        self.assertEqual(result, expected_output)
+    
+    def test_insert_multiple_rows(self):
+        script = [
+            "insert into users values (1, user1, person1@example.com)",
+            "insert into users values (2, user2, person2@example.com)",
+            "select * from users",
+            ".exit\n",
+        ]
+
+        result = self.run_script(script)
+        expected_output = [
+            "db > Executed.",
+            "db > Executed.",
+            "db > (1, user1, person1@example.com)",
+            "(2, user2, person2@example.com)",
+            "Executed.",
+            "db >",
+        ]
+
+        self.assertEqual(result, expected_output)
+
     def test_table_full_error(self):
         script = [f"insert into users values ({i}, user{i}, person{i}@example.com)" for i in range(1, 1402)]
         script.append(".exit\n")
