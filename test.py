@@ -113,6 +113,110 @@ class TestDatabase(unittest.TestCase):
 
         self.assertEqual(result, expected_output)
 
+    def test_update_row(self):
+        script = [
+            "insert into users values (1, user1, person1@example.com)",
+            "update users set username = 'user3' where id = 1",
+            "select * from users",
+            ".exit\n",
+        ]
+
+        result = self.run_script(script)
+
+        expected_output = [
+            "db > Executed.",
+            "db > Executed.",
+            "db > (1, user3, person1@example.com)",
+            "Executed.",
+            "db >",
+        ]
+
+        self.assertEqual(result, expected_output)
+    
+    def test_update_row_no_match(self):
+        script = [
+            "insert into users values (1, user1, person1@example.com)",
+            "update users set username = 'user3' where id = 2",
+            "select * from users",
+            ".exit\n",
+        ]
+
+        result = self.run_script(script)
+
+        expected_output = [
+            "db > Executed.",
+            "db > Executed.",
+            "db > (1, user1, person1@example.com)",
+            "Executed.",
+            "db >",
+        ]
+
+        self.assertEqual(result, expected_output)
+
+    def test_delete_row(self):
+        script = [
+            "insert into users values (1, user1, person1@example.com)",
+            "delete from users where id = 1",
+            "select * from users",
+            ".exit\n",
+        ]
+
+        result = self.run_script(script)
+
+        expected_output = [
+            "db > Executed.",
+            "db > Executed.",
+            "db > Executed.",
+            "db >",
+        ]
+
+        self.assertEqual(result, expected_output)
+
+    def test_delete_row_no_match(self):
+        script = [
+            "insert into users values (1, user1, person1@example.com)",
+            "delete from users where id = 2",
+            "select * from users",
+            ".exit\n",
+        ]
+
+        result = self.run_script(script)
+
+        expected_output = [
+            "db > Executed.",
+            "db > Executed.",
+            "db > (1, user1, person1@example.com)",
+            "Executed.",
+            "db >",
+        ]
+
+        self.assertEqual(result, expected_output)
+
+    def test_delete_in_the_middle(self):
+        script = [
+            "insert into users values (1, user1, person1@example.com)",
+            "insert into users values (2, user2, person2@example.com)",
+            "insert into users values (3, user3, person3@example.com)",
+            "delete from users where id = 2",
+            "select * from users",
+            ".exit\n",
+        ]
+
+        result = self.run_script(script)
+
+        expected_output = [
+            "db > Executed.",
+            "db > Executed.",
+            "db > Executed.",
+            "db > Executed.",
+            "db > (1, user1, person1@example.com)",
+            "(3, user3, person3@example.com)",
+            "Executed.",
+            "db >",
+        ]
+
+        self.assertEqual(result, expected_output)
+
     def test_table_full_error(self):
         script = [f"insert into users values ({i}, user{i}, person{i}@example.com)" for i in range(1, 1402)]
         script.append(".exit\n")

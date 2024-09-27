@@ -37,7 +37,12 @@ typedef enum {
 
 typedef enum { EXECUTE_SUCCESS, EXECUTE_TABLE_FULL } ExecuteResult;
 
-typedef enum { STATEMENT_INSERT, STATEMENT_SELECT } StatementType;
+typedef enum { 
+  STATEMENT_INSERT,
+  STATEMENT_UPDATE,
+  STATEMENT_DELETE,
+  STATEMENT_SELECT
+} StatementType;
 
 typedef enum { INTEGER, VARCHAR, REAL } ColumnType;
 
@@ -109,6 +114,16 @@ typedef struct {
 typedef struct {
   Row row_to_insert;
 } InsertStatement;
+
+typedef struct {
+  ColumnDefinition* column;
+  Bytes value;
+  WhereClause* where_clause;
+} UpdateStatement;
+
+typedef struct {
+  WhereClause* where_clause;
+} DeleteStatement;
 
 typedef struct {
   ColumnDefinition* columns;
@@ -557,6 +572,40 @@ Operator string_to_operator(char* str_op) {
   }
 }
 
+PrepareResult copy_value_into_bytes(ColumnDefinition* column, Bytes* bytes, char* value) {
+  switch (column->type) {
+    case INTEGER: {
+      int int_value = atoi(value);
+      bytes->length = column->size;
+      bytes->data = malloc(bytes->length);
+      memcpy(bytes->data, &int_value, bytes->length);
+      return PREPARE_SUCCESS;
+    }
+    case VARCHAR: {
+      if (value[0] != '\'' || value[strlen(value) - 1] != '\'') {
+        return PREPARE_SYNTAX_ERROR;
+      }
+
+      value[strlen(value) - 1] = '\0';
+      value++;
+
+      bytes->length = column->size;
+      bytes->data = malloc(bytes->length);
+      memcpy(bytes->data, value, bytes->length);
+
+      return PREPARE_SUCCESS;
+    }
+    case REAL: {
+      double real_value = atof(value);
+      bytes->length = column->size;
+      bytes->data = malloc(bytes->length);
+      memcpy(bytes->data, &real_value, bytes->length);
+
+      return PREPARE_SUCCESS;
+    }
+  }
+}
+
 PrepareResult parse_where_clause(char* where_part, WhereClause* where_clause,
                                  Table* table) {
   char* outer_ptr = NULL;
@@ -582,38 +631,227 @@ PrepareResult parse_where_clause(char* where_part, WhereClause* where_clause,
     return PREPARE_SYNTAX_ERROR;
   }
 
-  switch (where_clause->column->type) {
-    case INTEGER: {
-      int int_value = atoi(value);
-      where_clause->value.length = where_clause->column->size;
-      where_clause->value.data = malloc(where_clause->value.length);
-      memcpy(where_clause->value.data, &int_value, where_clause->value.length);
-      break;
+  if (where_clause->column->type == VARCHAR) {
+    if (value[0] != '\'' || value[strlen(value) - 1] != '\'') {
+      return PREPARE_SYNTAX_ERROR;
     }
-    case VARCHAR: {
-      // strip ' from the front and the end of value
-      if (value[0] != '\'' || value[strlen(value) - 1] != '\'') {
-        return PREPARE_SYNTAX_ERROR;
-      }
+  }
 
-      if (where_clause->op != OP_EQUAL && where_clause->op != OP_NOT_EQUAL) {
-        return PREPARE_SYNTAX_ERROR;
-      }
+  PrepareResult copy_result = copy_value_into_bytes(where_clause->column, &where_clause->value, value);
+  if (copy_result != PREPARE_SUCCESS) {
+    return copy_result;
+  }
 
-      value[strlen(value) - 1] = '\0';
-      value++;
-      where_clause->value.length = strlen(value);
-      where_clause->value.data = value;
-      break;
-    }
-    case REAL: {
-      double real_value = atof(value);
-      where_clause->value.length = where_clause->column->size;
-      where_clause->value.data = malloc(where_clause->value.length);
-      memcpy(where_clause->value.data, &real_value, where_clause->value.length);
+  return PREPARE_SUCCESS;
+}
+
+PrepareResult prepare_delete(InputBuffer* input_buffer, Statement* statement, Schema* schema) {
+  statement->type = STATEMENT_DELETE;
+  DeleteStatement* delete_statement = malloc(sizeof(DeleteStatement));
+  if (delete_statement == NULL) {
+    return PREPARE_INTERNAL_ERROR;
+  }
+
+  memset(delete_statement, 0, sizeof(DeleteStatement));
+
+  char* cpy = strdup(input_buffer->buffer);
+  if (!cpy) {
+    free(delete_statement);
+    return PREPARE_INTERNAL_ERROR;
+  }
+
+  trim(cpy);
+  char* lower_sql = str_to_lower(cpy);
+
+  if (strncmp(lower_sql, "delete from", 11) != 0) {
+    free(cpy);
+    free(lower_sql);
+    free(delete_statement);
+    return PREPARE_SYNTAX_ERROR;
+  }
+
+  char* where_pos = strstr(lower_sql, " where ");
+  if (!where_pos) {
+    free(cpy);
+    free(lower_sql);
+    free(delete_statement);
+    return PREPARE_SYNTAX_ERROR;
+  }
+
+  size_t table_name_length = where_pos - (lower_sql + 12);
+  char* table_name = malloc(table_name_length + 1);
+  strncpy(table_name, cpy + 12, table_name_length);
+  table_name[table_name_length] = '\0';
+  trim(table_name);
+
+  // check if table exists
+  Table* table = NULL;
+  for (uint32_t i = 0; i < schema->num_tables; i++) {
+    if (strcmp(schema->tables[i].table_name, table_name) == 0) {
+      table = &(schema->tables[i]);
       break;
     }
   }
+  if (table == NULL) {
+    free(cpy);
+    free(lower_sql);
+    free(table_name);
+    free(delete_statement);
+    return PREPARE_TABLE_NOT_FOUND;
+  }
+
+  statement->table = table;
+
+  char* where_part = where_pos + 7;
+  WhereClause* where_clause = malloc(sizeof(WhereClause));
+  if (where_clause == NULL) {
+    free(cpy);
+    free(lower_sql);
+    free(table_name);
+    free(delete_statement);
+    return PREPARE_INTERNAL_ERROR;
+  }
+
+  PrepareResult prepare_result = parse_where_clause(where_part, where_clause, table);
+  if (prepare_result != PREPARE_SUCCESS) {
+    free(cpy);
+    free(lower_sql);
+    free(table_name);
+    free(delete_statement);
+    return prepare_result;
+  }
+
+  delete_statement->where_clause = where_clause;
+  statement->statementDetail = delete_statement;
+
+  return PREPARE_SUCCESS;
+}
+
+PrepareResult prepare_update(InputBuffer* input_buffer, Statement* statement, Schema* schema) {
+  statement->type = STATEMENT_UPDATE;
+  UpdateStatement* update_statement = malloc(sizeof(UpdateStatement));
+  if (update_statement == NULL) {
+    return PREPARE_INTERNAL_ERROR;
+  }
+
+  memset(update_statement, 0, sizeof(UpdateStatement));
+
+  char* cpy = strdup(input_buffer->buffer);
+  if (!cpy) {
+    free(update_statement);
+    printf("strdup cpy\n");
+    return PREPARE_INTERNAL_ERROR;
+  }
+
+  trim(cpy);
+  char* lower_sql = str_to_lower(cpy);
+
+  if (strncmp(lower_sql, "update", 6) != 0) {
+    free(cpy);
+    free(lower_sql);
+    free(update_statement);
+    printf("update\n");
+    return PREPARE_SYNTAX_ERROR;
+  }
+
+  char* set_pos = strstr(lower_sql, " set ");
+  if (!set_pos) {
+    free(cpy);
+    free(lower_sql);
+    free(update_statement);
+    printf("set_pos\n");
+    return PREPARE_SYNTAX_ERROR;
+  }
+
+  char* where_pos = strstr(lower_sql, " where ");
+  if (!where_pos) {
+    free(cpy);
+    free(lower_sql);
+    free(update_statement);
+    printf("where_pos\n");
+    return PREPARE_SYNTAX_ERROR;
+  }
+
+  size_t table_name_length = set_pos - (lower_sql + 7);
+  char* table_name = malloc(table_name_length + 1);
+  strncpy(table_name, cpy + 7, table_name_length);
+  table_name[table_name_length] = '\0';
+  trim(table_name);
+
+  // check if table exists
+  Table* table = NULL;
+  for (uint32_t i = 0; i < schema->num_tables; i++) {
+    if (strcmp(schema->tables[i].table_name, table_name) == 0) {
+      table = &(schema->tables[i]);
+      break;
+    }
+  }
+  if (table == NULL) {
+    free(cpy);
+    free(lower_sql);
+    free(table_name);
+    free(update_statement);
+    return PREPARE_TABLE_NOT_FOUND;
+  }
+
+  statement->table = table;
+
+  char* set_part = set_pos + 5;
+  char* where_part = where_pos + 7;
+
+  // assume only update one column
+  char* column_name = strtok(set_part, " = ");
+  char* value = strtok(NULL, " = ");
+
+  ColumnDefinition* column = NULL;
+  for (uint32_t i = 0; i < table->num_columns; i++) {
+    if (strcmp(table->columns[i].name, column_name) == 0) {
+      column = &table->columns[i];
+      break;
+    }
+  }
+
+  if (column == NULL) {
+    free(cpy);
+    free(lower_sql);
+    free(table_name);
+    free(update_statement);
+    printf("column\n");
+    return PREPARE_SYNTAX_ERROR;
+  }
+
+  update_statement->column = column;
+
+  WhereClause* where_clause = malloc(sizeof(WhereClause));
+  if (where_clause == NULL) {
+    free(cpy);
+    free(lower_sql);
+    free(table_name);
+    free(update_statement);
+    return PREPARE_INTERNAL_ERROR;
+  }
+
+  PrepareResult prepare_result = parse_where_clause(where_part, where_clause, table);
+  if (prepare_result != PREPARE_SUCCESS) {
+    free(cpy);
+    free(lower_sql);
+    free(table_name);
+    free(update_statement);
+    return prepare_result;
+  }
+
+  update_statement->where_clause = where_clause;
+  
+  PrepareResult copy_result = copy_value_into_bytes(column, &update_statement->value, value);
+  if (copy_result != PREPARE_SUCCESS) {
+    free(cpy);
+    free(lower_sql);
+    free(table_name);
+    free(update_statement);
+    return copy_result;
+  }
+
+  statement->statementDetail = update_statement;
 
   return PREPARE_SUCCESS;
 }
@@ -943,6 +1181,12 @@ PrepareResult prepare_statement(InputBuffer* input_buffer, Statement* statement,
   if (strncmp(input_buffer->buffer, "select", 6) == 0) {
     return prepare_select(input_buffer, statement, schema);
   }
+  if (strncmp(input_buffer->buffer, "update", 6) == 0) {
+    return prepare_update(input_buffer, statement, schema);
+  }
+  if (strncmp(input_buffer->buffer, "delete", 6) == 0) {
+    return prepare_delete(input_buffer, statement, schema);
+  }
 
   return PREPARE_UNRECOGNIZED_STATEMENT;
 }
@@ -1087,12 +1331,103 @@ ExecuteResult execute_select(Statement* statement) {
   return EXECUTE_SUCCESS;
 }
 
+ExecuteResult execute_update(Statement* statement) {
+  UpdateStatement* update_statement = statement->statementDetail;
+  Table* table = statement->table;
+
+  Cursor* cursor = table_start(table);
+
+  Row row;
+  while (!(cursor->end_of_table)) {
+    deserialize_row(cursor_value(cursor), &row, table);
+
+    if (!valid_where_clause(&row, update_statement->where_clause)) {
+      cursor_advance(cursor);
+      continue;
+    }
+
+    ColumnDefinition* column = update_statement->column;
+    memcpy(row.data + column->offset, update_statement->value.data, column->size);
+
+    serialize_row(&row, cursor_value(cursor), table);
+
+    cursor_advance(cursor);
+  }
+
+  free(cursor);
+
+  return EXECUTE_SUCCESS;
+}
+
+ExecuteResult execute_delete(Statement* statement) {
+  DeleteStatement* delete_statement = statement->statementDetail;
+  Table* table = statement->table;
+
+  Cursor* cursor = table_start(table);
+
+  int num_deleted_rows = 0;
+
+  Row row;
+  while (!(cursor->end_of_table)) {
+    deserialize_row(cursor_value(cursor), &row, table);
+
+    if (!valid_where_clause(&row, delete_statement->where_clause)) {
+      cursor_advance(cursor);
+      continue;
+    }
+
+    memset(cursor_value(cursor), 0, table->row_size);
+    cursor_advance(cursor);
+    num_deleted_rows++;
+  }
+
+  cursor = table_start(table);
+  Cursor* cursor2 = malloc(sizeof(Cursor));
+  cursor2->table = table;
+  cursor2->row_num = -1;
+  cursor2->end_of_table = false;
+
+  unsigned char* empty_row = malloc(table->row_size);
+  memset(empty_row, 0, table->row_size);
+
+  while (!(cursor->end_of_table)) {
+    deserialize_row(cursor_value(cursor), &row, table);
+
+    if (memcmp(cursor_value(cursor), empty_row, table->row_size) == 0) {
+      cursor2->row_num = cursor->row_num;
+      cursor2->end_of_table = cursor->end_of_table;
+      cursor_advance(cursor);
+      continue;
+    }
+
+    if (memcmp(cursor_value(cursor), empty_row, table->row_size) != 0) {
+      if (cursor2->row_num != -1) {
+        memcpy(cursor_value(cursor2), cursor_value(cursor), table->row_size);
+        memset(cursor_value(cursor), 0, table->row_size);
+        cursor_advance(cursor);
+        cursor_advance(cursor2);
+      } else {
+        cursor_advance(cursor);
+      }
+    }
+  }
+
+  table->num_rows -= num_deleted_rows;
+  free(cursor);
+
+  return EXECUTE_SUCCESS;
+}
+
 ExecuteResult execute_statement(Statement* statement) {
   switch (statement->type) {
     case STATEMENT_INSERT:
       return execute_insert(statement);
     case STATEMENT_SELECT:
       return execute_select(statement);
+    case STATEMENT_UPDATE:
+      return execute_update(statement);
+    case STATEMENT_DELETE:
+      return execute_delete(statement);
   }
 }
 
